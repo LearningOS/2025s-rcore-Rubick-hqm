@@ -10,14 +10,18 @@
 //! might not be what you expect.
 
 mod context;
+mod record;
 mod switch;
 #[allow(clippy::module_inception)]
 mod task;
+
+use core::array;
 
 use crate::config::MAX_APP_NUM;
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
 use lazy_static::*;
+use record::TaskRecord;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
 
@@ -45,6 +49,8 @@ pub struct TaskManagerInner {
     tasks: [TaskControlBlock; MAX_APP_NUM],
     /// id of current `Running` task
     current_task: usize,
+    ///
+    records: [TaskRecord; MAX_APP_NUM],
 }
 
 lazy_static! {
@@ -65,6 +71,7 @@ lazy_static! {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
                     current_task: 0,
+                    records: array::from_fn(|_| TaskRecord::new()),
                 })
             },
         }
@@ -135,6 +142,18 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    fn record_syscall(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.records[current].record_syscall(syscall_id);
+    }
+
+    fn count_syscall(&self, syscall_id: usize) -> usize {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.records[current].count_syscall(syscall_id)
+    }
 }
 
 /// Run the first task in task list.
@@ -168,4 +187,28 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+/// Read data from "address"
+pub fn read_current_data(address: *const u8) -> usize {
+    unsafe { *address as usize }
+}
+
+/// Write data into "address"
+pub fn write_current_data(address: *const u8, data: u8) -> usize {
+    unsafe {
+        let ptr = address as *mut u8;
+        *ptr.as_mut().unwrap() = data;
+        0
+    }
+}
+
+/// Return how many times the "syscall_id" called
+pub fn count_current_syscall(syscall_id: usize) -> usize {
+    TASK_MANAGER.count_syscall(syscall_id)
+}
+
+/// Record this syscall
+pub fn record_syscall(syscall_id: usize) {
+    TASK_MANAGER.record_syscall(syscall_id)
 }
