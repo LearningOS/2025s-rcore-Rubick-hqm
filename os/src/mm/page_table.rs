@@ -1,4 +1,5 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
+
 use super::{frame_alloc, FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 use alloc::string::String;
 use alloc::vec;
@@ -8,18 +9,26 @@ use bitflags::*;
 bitflags! {
     /// page table entry flags
     pub struct PTEFlags: u8 {
+        /// Valid
         const V = 1 << 0;
+        /// Readable
         const R = 1 << 1;
+        /// Writable
         const W = 1 << 2;
+        /// eXecutable
         const X = 1 << 3;
+        /// User
         const U = 1 << 4;
+        /// Global
         const G = 1 << 5;
+        /// Accessed
         const A = 1 << 6;
+        /// Dirty
         const D = 1 << 7;
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 #[repr(C)]
 /// page table entry structure
 pub struct PageTableEntry {
@@ -61,6 +70,10 @@ impl PageTableEntry {
     /// The page pointered by page table entry is executable?
     pub fn executable(&self) -> bool {
         (self.flags() & PTEFlags::X) != PTEFlags::empty()
+    }
+    /// The page pointered by page table entry is user?
+    pub fn user(&self) -> bool {
+        (self.flags() & PTEFlags::U) != PTEFlags::empty()
     }
 }
 
@@ -126,14 +139,12 @@ impl PageTable {
         result
     }
     /// set the map between virtual page number and physical page number
-    #[allow(unused)]
     pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
         let pte = self.find_pte_create(vpn).unwrap();
         assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
     }
     /// remove the map between virtual page number and physical page number
-    #[allow(unused)]
     pub fn unmap(&mut self, vpn: VirtPageNum) {
         let pte = self.find_pte(vpn).unwrap();
         assert!(pte.is_valid(), "vpn {:?} is invalid before unmapping", vpn);
@@ -143,12 +154,10 @@ impl PageTable {
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
         self.find_pte(vpn).map(|pte| *pte)
     }
-    /// get the physical address from the virtual address
+    /// 虚拟地址翻译为物理地址
     pub fn translate_va(&self, va: VirtAddr) -> Option<PhysAddr> {
-        self.find_pte(va.clone().floor()).map(|pte| {
-            //println!("translate_va:va = {:?}", va);
+        self.find_pte(va.floor()).map(|pte| {
             let aligned_pa: PhysAddr = pte.ppn().into();
-            //println!("translate_va:pa_align = {:?}", aligned_pa);
             let offset = va.page_offset();
             let aligned_pa_usize: usize = aligned_pa.into();
             (aligned_pa_usize + offset).into()
@@ -183,8 +192,20 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
     v
 }
 
-/// Translate&Copy a ptr[u8] array end with `\0` to a `String` Vec through page table
-pub fn translated_str(token: usize, ptr: *const u8) -> String {
+/// 返回token下，ptr的pte
+pub fn translate_pte(token: usize, ptr: *const u8) -> Option<PageTableEntry> {
+    let page_table = PageTable::from_token(token);
+    let vpn = VirtAddr::from(ptr as usize).floor();
+    page_table.translate(vpn)
+}
+
+/// 翻译字符串
+///
+/// token: 页表的token
+/// ptr: 字符串开始虚拟地址
+///
+/// 返回：String
+pub fn translate_str(token: usize, ptr: *const u8) -> String {
     let page_table = PageTable::from_token(token);
     let mut string = String::new();
     let mut va = ptr as usize;
@@ -202,14 +223,12 @@ pub fn translated_str(token: usize, ptr: *const u8) -> String {
     }
     string
 }
-/// Translate a ptr[u8] array through page table and return a mutable reference of T
+
+/// 给定虚拟地址ptr，返回T的可变引用
 pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
-    //trace!("into translated_refmut!");
     let page_table = PageTable::from_token(token);
-    let va = ptr as usize;
-    //trace!("translated_refmut: before translate_va");
     page_table
-        .translate_va(VirtAddr::from(va))
+        .translate_va(VirtAddr::from(ptr as usize))
         .unwrap()
         .get_mut()
 }

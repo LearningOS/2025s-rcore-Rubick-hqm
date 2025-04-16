@@ -1,4 +1,5 @@
 //! Implementation of [`MapArea`] and [`MemorySet`].
+
 use super::{frame_alloc, FrameTracker};
 use super::{PTEFlags, PageTable, PageTableEntry};
 use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
@@ -37,18 +38,22 @@ pub struct MemorySet {
 }
 
 impl MemorySet {
-    /// Create a new empty `MemorySet`.
-    pub fn new_bare() -> Self {
+    /// 创建一个空的内存段
+    fn new_bare() -> Self {
         Self {
             page_table: PageTable::new(),
             areas: Vec::new(),
         }
     }
-    /// Get the page table token
+    /// 获取页表token
     pub fn token(&self) -> usize {
         self.page_table.token()
     }
-    /// Assume that no conflicts.
+    /// 回收数据页
+    pub fn recycle_data_pages(&mut self) {
+        self.areas.clear();
+    }
+    /// 插入一个逻辑段，并分配物理页
     pub fn insert_framed_area(
         &mut self,
         start_va: VirtAddr,
@@ -60,21 +65,17 @@ impl MemorySet {
             None,
         );
     }
-    /// remove a area
+    /// 删除一个逻辑段，并取消映射物理页
     pub fn remove_area_with_start_vpn(&mut self, start_vpn: VirtPageNum) {
-        if let Some((idx, area)) = self
+        if let Some(index) = self
             .areas
-            .iter_mut()
-            .enumerate()
-            .find(|(_, area)| area.vpn_range.get_start() == start_vpn)
+            .iter()
+            .position(|area| area.vpn_range.get_start() == start_vpn)
         {
+            let mut area = self.areas.remove(index);
             area.unmap(&mut self.page_table);
-            self.areas.remove(idx);
         }
     }
-    /// Add a new MapArea into this MemorySet.
-    /// Assuming that there are no conflicts in the virtual address
-    /// space.
     fn push(&mut self, mut map_area: MapArea, data: Option<&[u8]>) {
         map_area.map(&mut self.page_table);
         if let Some(data) = data {
@@ -90,8 +91,8 @@ impl MemorySet {
             PTEFlags::R | PTEFlags::X,
         );
     }
-    /// Without kernel stacks.
-    pub fn new_kernel() -> Self {
+    /// 创建一个内核地址空间
+    fn new_kernel() -> Self {
         let mut memory_set = Self::new_bare();
         // map trampoline
         memory_set.map_trampoline();
@@ -155,8 +156,8 @@ impl MemorySet {
         );
         memory_set
     }
-    /// Include sections in elf and trampoline and TrapContext and user stack,
-    /// also returns user_sp_base and entry point.
+    /// 从elf文件创建一个用户地址空间
+    /// 返回用户地址空间、用户栈顶和入口点
     pub fn from_elf(elf_data: &[u8]) -> (Self, usize, usize) {
         let mut memory_set = Self::new_bare();
         // map trampoline
@@ -233,16 +234,14 @@ impl MemorySet {
             elf.header.pt2.entry_point() as usize,
         )
     }
-    /// Create a new address space by copy code&data from a exited process's address space.
+    /// 从已有的用户地址空间复制一个新地址空间
     pub fn from_existed_user(user_space: &Self) -> Self {
         let mut memory_set = Self::new_bare();
-        // map trampoline
         memory_set.map_trampoline();
-        // copy data sections/trap_context/user_stack
         for area in user_space.areas.iter() {
             let new_area = MapArea::from_another(area);
             memory_set.push(new_area, None);
-            // copy data from another space
+            // 将旧数据复制到新的物理页中
             for vpn in area.vpn_range {
                 let src_ppn = user_space.translate(vpn).unwrap().ppn();
                 let dst_ppn = memory_set.translate(vpn).unwrap().ppn();
@@ -253,7 +252,8 @@ impl MemorySet {
         }
         memory_set
     }
-    /// Change page table by writing satp CSR Register.
+    /// 激活地址空间
+    /// 仅用于内核地址空间
     pub fn activate(&self) {
         let satp = self.page_table.token();
         unsafe {
@@ -261,18 +261,11 @@ impl MemorySet {
             asm!("sfence.vma");
         }
     }
-    /// Translate a virtual page number to a page table entry
+    /// 翻译一个虚拟页号到页表项
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
         self.page_table.translate(vpn)
     }
-
-    ///Remove all `MapArea`
-    pub fn recycle_data_pages(&mut self) {
-        self.areas.clear();
-    }
-
-    /// shrink the area to new_end
-    #[allow(unused)]
+    /// 缩小一个内存段到新的结束地址
     pub fn shrink_to(&mut self, start: VirtAddr, new_end: VirtAddr) -> bool {
         if let Some(area) = self
             .areas
@@ -285,9 +278,7 @@ impl MemorySet {
             false
         }
     }
-
-    /// append the area to new_end
-    #[allow(unused)]
+    /// 扩展一个内存段到新的结束地址
     pub fn append_to(&mut self, start: VirtAddr, new_end: VirtAddr) -> bool {
         if let Some(area) = self
             .areas
@@ -300,12 +291,42 @@ impl MemorySet {
             false
         }
     }
+    /// 检查是否存在重叠区域
+    pub fn overlaps(&self, start: VirtAddr, end: VirtAddr) -> bool {
+        self.areas.iter().any(|area| {
+            // 不用考虑等号，因为虚拟页号范围是[vpn_range.get_start(), vpn_range.get_end())
+            area.vpn_range.get_start() < end.ceil() && area.vpn_range.get_end() > start.floor()
+        })
+    }
+
+    /// 取消映射一段逻辑段
+    pub fn remove_area(&mut self, start: VirtAddr, end: VirtAddr) -> isize {
+        // 找到需要取消映射的区域
+        let index = self.areas.iter().position(|area| {
+            area.vpn_range.get_start() == start.floor() && area.vpn_range.get_end() == end.ceil()
+        });
+        // 取消映射
+        if let Some(index) = index {
+            let mut area = self.areas.remove(index);
+            area.unmap(&mut self.page_table);
+            0
+        } else {
+            -1
+        }
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
+/// 控制一段连续的虚拟内存
+/// range: [vpn_range.get_start(), vpn_range.get_end())
+#[derive(Debug)]
 pub struct MapArea {
+    /// 虚拟页号范围 [vpn_range.get_start(), vpn_range.get_end())
     vpn_range: VPNRange,
+    /// 数据帧
     data_frames: BTreeMap<VirtPageNum, FrameTracker>,
+    /// 映射类型
     map_type: MapType,
+    /// 映射权限
     map_perm: MapPermission,
 }
 
@@ -325,12 +346,16 @@ impl MapArea {
             map_perm,
         }
     }
-    pub fn from_another(another: &Self) -> Self {
+    /// 从一个已有的内存段复制一个新内存段
+    ///
+    /// 1. 物理页要重新分配
+    /// 2. 其他字段拷贝
+    pub fn from_another(other: &Self) -> Self {
         Self {
-            vpn_range: VPNRange::new(another.vpn_range.get_start(), another.vpn_range.get_end()),
+            vpn_range: other.vpn_range.clone(),
             data_frames: BTreeMap::new(),
-            map_type: another.map_type,
-            map_perm: another.map_perm,
+            map_type: other.map_type.clone(),
+            map_perm: other.map_perm.clone(),
         }
     }
     pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
@@ -364,14 +389,12 @@ impl MapArea {
             self.unmap_one(page_table, vpn);
         }
     }
-    #[allow(unused)]
     pub fn shrink_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
         for vpn in VPNRange::new(new_end, self.vpn_range.get_end()) {
             self.unmap_one(page_table, vpn)
         }
         self.vpn_range = VPNRange::new(self.vpn_range.get_start(), new_end);
     }
-    #[allow(unused)]
     pub fn append_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
         for vpn in VPNRange::new(self.vpn_range.get_end(), new_end) {
             self.map_one(page_table, vpn)

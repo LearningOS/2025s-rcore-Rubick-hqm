@@ -3,11 +3,12 @@ use alloc::sync::Arc;
 
 use crate::{
     loader::get_app_data_by_name,
-    mm::{translated_refmut, translated_str},
+    mm::{translate_str, translated_byte_buffer, translated_refmut, MapPermission, VirtAddr},
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
         suspend_current_and_run_next,
     },
+    timer::get_time_us,
 };
 
 #[repr(C)]
@@ -19,143 +20,225 @@ pub struct TimeVal {
 
 /// task exits and submit an exit code
 pub fn sys_exit(exit_code: i32) -> ! {
-    trace!("kernel:pid[{}] sys_exit", current_task().unwrap().pid.0);
+    trace!("kernel: sys_exit");
     exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");
 }
 
 /// current task gives up resources for other tasks
 pub fn sys_yield() -> isize {
-    trace!("kernel:pid[{}] sys_yield", current_task().unwrap().pid.0);
+    trace!("kernel: sys_yield");
     suspend_current_and_run_next();
     0
 }
 
-pub fn sys_getpid() -> isize {
-    trace!("kernel: sys_getpid pid:{}", current_task().unwrap().pid.0);
-    current_task().unwrap().pid.0 as isize
-}
-
-pub fn sys_fork() -> isize {
-    trace!("kernel:pid[{}] sys_fork", current_task().unwrap().pid.0);
-    let current_task = current_task().unwrap();
-    let new_task = current_task.fork();
-    let new_pid = new_task.pid.0;
-    // modify trap context of new_task, because it returns immediately after switching
-    let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
-    // we do not have to move to next instruction since we have done it before
-    // for child process, fork returns 0
-    trap_cx.x[10] = 0;
-    // add new task to scheduler
-    add_task(new_task);
-    new_pid as isize
-}
-
-pub fn sys_exec(path: *const u8) -> isize {
-    trace!("kernel:pid[{}] sys_exec", current_task().unwrap().pid.0);
-    let token = current_user_token();
-    let path = translated_str(token, path);
-    if let Some(data) = get_app_data_by_name(path.as_str()) {
-        let task = current_task().unwrap();
-        task.exec(data);
-        0
-    } else {
-        -1
+/// 获取当前时间
+///
+/// ts: 指向TimeVal结构体的指针
+/// _tz: 时区，暂时不用
+///
+/// 返回0
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
+    trace!("kernel: sys_get_time");
+    let us = get_time_us();
+    let timeval = TimeVal {
+        sec: us / 1_000_000,
+        usec: us % 1_000_000,
+    };
+    let src = &timeval as *const TimeVal as *const u8;
+    // ts是虚拟地址，需要拿到他的物理地址
+    let dst = ts as *const u8;
+    let buffers =
+        translated_byte_buffer(current_user_token(), dst, core::mem::size_of_val(&timeval));
+    for buffer in buffers {
+        unsafe {
+            buffer.copy_from_slice(core::slice::from_raw_parts(src, buffer.len()));
+        }
     }
+    0
 }
 
-/// If there is not a child process whose pid is same as given, return -1.
-/// Else if there is a child process but it is still running, return -2.
-pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
-    trace!("kernel::pid[{}] sys_waitpid [{}]", current_task().unwrap().pid.0, pid);
-    let task = current_task().unwrap();
-    // find a child process
+/// 映射一段逻辑段
+///
+/// start: 逻辑段起始地址
+/// len: 逻辑段长度
+/// prot: 保护属性
+///
+/// 返回：成功返回0，失败返回-1
+pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
+    trace!("kernel: sys_mmap NOT IMPLEMENTED YET!");
 
-    // ---- access current PCB exclusively
-    let mut inner = task.inner_exclusive_access();
-    if !inner
-        .children
-        .iter()
-        .any(|p| pid == -1 || pid as usize == p.getpid())
-    {
+    // 校验参数
+
+    // 检查prot是否合法，仅允许R,W,X
+    if prot & !0x7 != 0 || prot & 0x7 == 0 {
         return -1;
-        // ---- release current PCB
     }
-    let pair = inner.children.iter().enumerate().find(|(_, p)| {
-        // ++++ temporarily access child PCB exclusively
-        p.inner_exclusive_access().is_zombie() && (pid == -1 || pid as usize == p.getpid())
-        // ++++ release child PCB
-    });
-    if let Some((idx, _)) = pair {
-        let child = inner.children.remove(idx);
-        // confirm that child will be deallocated after being removed from children list
-        assert_eq!(Arc::strong_count(&child), 1);
-        let found_pid = child.getpid();
-        // ++++ temporarily access child PCB exclusively
-        let exit_code = child.inner_exclusive_access().exit_code;
-        // ++++ release child PCB
-        *translated_refmut(inner.memory_set.token(), exit_code_ptr) = exit_code;
-        found_pid as isize
-    } else {
-        -2
+    // 将prot转换为MapPermission
+    let mut perm = MapPermission::U;
+    if prot & 0x1 != 0 {
+        perm |= MapPermission::R;
     }
-    // ---- release current PCB automatically
+    if prot & 0x2 != 0 {
+        perm |= MapPermission::W;
+    }
+    if prot & 0x4 != 0 {
+        perm |= MapPermission::X;
+    }
+    // 检查start是否4k对齐
+    if start & 0xfff != 0 {
+        return -1;
+    }
+
+    let current_task = current_task().unwrap();
+    let mut inner = current_task.inner_exclusive_access();
+    let memory_set = &mut inner.memory_set;
+    // 检查是否存在重叠区域
+    if memory_set.overlaps(VirtAddr::from(start), VirtAddr::from(start + len)) {
+        return -1;
+    }
+    memory_set.insert_framed_area(VirtAddr::from(start), VirtAddr::from(start + len), perm);
+    0
 }
 
-/// YOUR JOB: get time with second and microsecond
-/// HINT: You might reimplement it with virtual memory management.
-/// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+/// 取消映射一段逻辑段
+///
+/// start: 逻辑段起始地址
+/// len: 逻辑段长度
+///
+/// 返回：成功返回0，失败返回-1
+pub fn sys_munmap(start: usize, len: usize) -> isize {
+    trace!("kernel: sys_munmap NOT IMPLEMENTED YET!");
+
+    // 检查start是否4k对齐
+    if start & 0xfff != 0 {
+        return -1;
+    }
+
+    let current_task = current_task().unwrap();
+    let mut inner = current_task.inner_exclusive_access();
+    let memory_set = &mut inner.memory_set;
+
+    memory_set.remove_area(VirtAddr::from(start), VirtAddr::from(start + len))
 }
 
-/// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
-}
-
-/// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
-}
-
-/// change data segment size
+/// 改变堆大小
+///
+/// size: 堆大小，正数增大堆，负数减小堆
+///
+/// 返回：成功返回旧的堆顶，失败返回-1
 pub fn sys_sbrk(size: i32) -> isize {
-    trace!("kernel:pid[{}] sys_sbrk", current_task().unwrap().pid.0);
-    if let Some(old_brk) = current_task().unwrap().change_program_brk(size) {
+    trace!("kernel: sys_sbrk");
+    let current_task = current_task().unwrap();
+    if let Some(old_brk) = current_task.change_program_brk(size) {
         old_brk as isize
     } else {
         -1
     }
 }
 
-/// YOUR JOB: Implement spawn.
-/// HINT: fork + exec =/= spawn
-pub fn sys_spawn(_path: *const u8) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+/// 创建一个新进程
+///
+/// 返回：新进程的PID
+pub fn sys_fork() -> isize {
+    trace!("kernel: sys_fork");
+    let current_task = current_task().unwrap();
+    let new_task = current_task.fork();
+    let new_pid = new_task.get_pid();
+
+    // 设置子进程返回值为0，通过设置寄存器值x10
+    let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
+    trap_cx.x[10] = 0;
+    add_task(new_task);
+
+    new_pid as isize
 }
 
-// YOUR JOB: Set task priority.
-pub fn sys_set_priority(_prio: isize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+/// 执行一个新程序
+///
+/// path: 程序路径
+///
+/// 返回：成功返回0，失败返回-1
+pub fn sys_exec(path: *const u8) -> isize {
+    trace!("kernel: sys_exec ");
+    let path = translate_str(current_user_token(), path);
+    let app_data = get_app_data_by_name(&path);
+    if app_data.is_none() {
+        return -1;
+    }
+
+    let app_data = app_data.unwrap();
+    let current_task = current_task().unwrap();
+    current_task.exec(app_data);
+    0
+}
+
+pub fn sys_spawn(path: *const u8) -> isize {
+    trace!("kernel: sys_spawn");
+    let path = translate_str(current_user_token(), path);
+    let app_data = get_app_data_by_name(&path);
+    if app_data.is_none() {
+        return -1;
+    }
+
+    let current_task = current_task().unwrap();
+    let new_task = current_task.spawn(app_data.unwrap());
+    let new_pid = new_task.get_pid();
+    add_task(new_task);
+
+    new_pid as isize
+}
+
+/// 等待子进程结束
+///
+/// pid: 子进程的PID
+/// exit_code_ptr: 指向exit_code的指针
+///
+/// 返回：成功返回子进程的PID，失败返回-1
+pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
+    trace!("kernel: sys_waitpid");
+
+    let current_task = current_task().unwrap();
+
+    let mut inner = current_task.inner_exclusive_access();
+    if !inner
+        .children
+        .iter()
+        .any(|p| pid == -1 || pid as usize == p.get_pid())
+    {
+        return -1;
+    }
+
+    let pair = inner.children.iter().enumerate().find(|(_, p)| {
+        p.inner_exclusive_access().is_zombie() && (pid == -1 || pid as usize == p.get_pid())
+    });
+
+    if let Some((index, _)) = pair {
+        let child = inner.children.remove(index);
+        assert_eq!(Arc::strong_count(&child), 1);
+        let found_pid = child.get_pid();
+        let exit_code = child.inner_exclusive_access().exit_code;
+        *translated_refmut(inner.memory_set.token(), exit_code_ptr) = exit_code;
+        found_pid as isize
+    } else {
+        -2
+    }
+}
+
+/// 获取当前进程的PID
+pub fn sys_getpid() -> isize {
+    trace!("kernel: sys_getpid");
+    current_task().unwrap().get_pid() as isize
+}
+
+/// 设置当前进程的优先级
+pub fn sys_set_priority(priority: isize) -> isize {
+    trace!("kernel: sys_set_priority");
+    if priority <= 1 {
+        return -1;
+    }
+    let current_task = current_task().unwrap();
+    let mut inner = current_task.inner_exclusive_access();
+    inner.set_priority(priority as u32);
+    priority
 }

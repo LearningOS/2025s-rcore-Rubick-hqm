@@ -4,114 +4,119 @@
 //! implemented here.
 //!
 //! A single global instance of [`TaskManager`] called `TASK_MANAGER` controls
-//! all the tasks in the whole operating system.
-//!
-//! A single global instance of [`Processor`] called `PROCESSOR` monitors running
-//! task(s) for each core.
-//!
-//! A single global instance of `PID_ALLOCATOR` allocates pid for user apps.
+//! all the tasks in the operating system.
 //!
 //! Be careful when you see `__switch` ASM function in `switch.S`. Control flow around this function
 //! might not be what you expect.
+
 mod context;
-mod id;
 mod manager;
+mod pid;
 mod processor;
 mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
-use crate::loader::get_app_data_by_name;
+use crate::{loader::get_app_data_by_name, sbi::shutdown};
 use alloc::sync::Arc;
-use lazy_static::*;
-pub use manager::{fetch_task, TaskManager};
-use switch::__switch;
-pub use task::{TaskControlBlock, TaskStatus};
+use lazy_static::lazy_static;
 
 pub use context::TaskContext;
-pub use id::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-pub use manager::add_task;
-pub use processor::{
-    current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task,
-    Processor,
-};
-/// Suspend the current 'Running' task and run the next task in task list.
+pub use manager::*;
+pub use pid::*;
+pub use processor::*;
+pub use task::*;
+
+lazy_static! {
+    /// initproc的task control block
+    pub static ref INITPROC: Arc<TaskControlBlock> = Arc::new(TaskControlBlock::new(
+        get_app_data_by_name("ch5b_initproc").unwrap(),
+    ));
+}
+
+//     /// 记录syscall_id 次数
+//     pub fn record_syscall(&self, syscall_id: usize) {
+//         let mut inner = self.inner.exclusive_access();
+//         let current = inner.current_task;
+//         inner.records[current]
+//             .entry(syscall_id)
+//             .and_modify(|v| *v += 1)
+//             .or_insert(1);
+//     }
+
+//     /// 返回syscall_id次数
+//     pub fn count_syscall(&self, syscall_id: usize) -> isize {
+//         let inner = self.inner.exclusive_access();
+//         let current = inner.current_task;
+//         inner.records[current]
+//             .get(&syscall_id)
+//             .cloned()
+//             .unwrap_or(0)
+//     }
+
+// }
+
+/// 暂停当前任务并运行下一个任务
+///
+/// 1. 将当前任务设置为就绪状态
+/// 2. 将当前任务添加到TaskManager中
+/// 3. 运行下一个任务
+///
+/// task目前仍是两部分引用 1. TaskManger.ready_queue 2. initproc.children
 pub fn suspend_current_and_run_next() {
-    // There must be an application running.
     let task = take_current_task().unwrap();
-
-    // ---- access current TCB exclusively
-    let mut task_inner = task.inner_exclusive_access();
-    let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
-    // Change status to Ready
-    task_inner.task_status = TaskStatus::Ready;
-    drop(task_inner);
-    // ---- release current PCB
-
-    // push back to ready queue.
+    let task_cx_ptr;
+    // 释放task，让task直接移动到add_task中
+    {
+        let mut task_inner = task.inner_exclusive_access();
+        task_inner.task_status = TaskStatus::Ready;
+        task_cx_ptr = task_inner.get_task_cx_ptr();
+    }
     add_task(task);
-    // jump to scheduling cycle
     schedule(task_cx_ptr);
 }
 
-/// pid of usertests app in make run TEST=1
-pub const IDLE_PID: usize = 0;
-
-/// Exit the current 'Running' task and run the next task in task list.
+/// 退出当前任务并运行下一个任务
+///
+/// 1. 设置当前任务为僵尸状态
+/// 2. 将当前任务的所有儿子都托管给initproc
+/// 3. 回收当前任务的数据页
+/// 4. 运行下一个任务
+///
+/// task现在仅一个引用 1. initproc.children
 pub fn exit_current_and_run_next(exit_code: i32) {
-    // take from Processor
     let task = take_current_task().unwrap();
-
-    let pid = task.getpid();
-    if pid == IDLE_PID {
-        println!(
-            "[kernel] Idle process exit with exit_code {} ...",
-            exit_code
-        );
-        panic!("All applications completed!");
+    // 当前为INITPROC，直接退出
+    if task.get_pid() == 0 {
+        shutdown();
     }
 
-    // **** access current TCB exclusively
     let mut inner = task.inner_exclusive_access();
-    // Change status to Zombie
     inner.task_status = TaskStatus::Zombie;
-    // Record exit code
     inner.exit_code = exit_code;
-    // do not move to its parent but under initproc
 
-    // ++++++ access initproc TCB exclusively
+    // 将此任务的所有儿子都托管给initproc
     {
         let mut initproc_inner = INITPROC.inner_exclusive_access();
-        for child in inner.children.iter() {
+        inner.children.iter().for_each(|child| {
             child.inner_exclusive_access().parent = Some(Arc::downgrade(&INITPROC));
-            initproc_inner.children.push(child.clone());
-        }
+            initproc_inner.children.push(Arc::clone(child));
+        });
     }
-    // ++++++ release parent PCB
 
     inner.children.clear();
-    // deallocate user space
+    // 回收当前任务的数据页
     inner.memory_set.recycle_data_pages();
     drop(inner);
-    // **** release current PCB
-    // drop task manually to maintain rc correctly
+
     drop(task);
-    // we do not have to save task context
+
+    // 运行下一个任务
     let mut _unused = TaskContext::zero_init();
     schedule(&mut _unused as *mut _);
 }
 
-lazy_static! {
-    /// Creation of initial process
-    ///
-    /// the name "initproc" may be changed to any other app name like "usertests",
-    /// but we have user_shell, so we don't need to change it.
-    pub static ref INITPROC: Arc<TaskControlBlock> = Arc::new(TaskControlBlock::new(
-        get_app_data_by_name("ch5b_initproc").unwrap()
-    ));
-}
-
-///Add init process to the manager
+/// 添加initproc到TaskManager中
 pub fn add_initproc() {
     add_task(INITPROC.clone());
 }

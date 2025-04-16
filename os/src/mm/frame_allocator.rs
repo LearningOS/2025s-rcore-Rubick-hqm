@@ -1,7 +1,8 @@
 //! Implementation of [`FrameAllocator`] which
 //! controls all the frames in the operating system.
+
 use super::{PhysAddr, PhysPageNum};
-use crate::config::MEMORY_END;
+use crate::config::{MEMORY_END, PAGE_SIZE};
 use crate::sync::UPSafeCell;
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
@@ -97,6 +98,8 @@ pub fn init_frame_allocator() {
     extern "C" {
         fn ekernel();
     }
+    assert!(ekernel as usize % PAGE_SIZE == 0, "ekernel not aligned");
+    assert!(MEMORY_END % PAGE_SIZE == 0, "MEMORY_END not aligned");
     FRAME_ALLOCATOR.exclusive_access().init(
         PhysAddr::from(ekernel as usize).ceil(),
         PhysAddr::from(MEMORY_END).floor(),

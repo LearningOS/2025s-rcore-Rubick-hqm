@@ -6,7 +6,7 @@ use core::fmt::{self, Debug, Formatter};
 const PA_WIDTH_SV39: usize = 56;
 const VA_WIDTH_SV39: usize = 39;
 const PPN_WIDTH_SV39: usize = PA_WIDTH_SV39 - PAGE_SIZE_BITS;
-const VPN_WIDTH_SV39: usize = VA_WIDTH_SV39 - PAGE_SIZE_BITS;
+// const VPN_WIDTH_SV39: usize = VA_WIDTH_SV39 - PAGE_SIZE_BITS;
 
 /// physical address
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
@@ -61,11 +61,6 @@ impl From<usize> for PhysPageNum {
 impl From<usize> for VirtAddr {
     fn from(v: usize) -> Self {
         Self(v & ((1 << VA_WIDTH_SV39) - 1))
-    }
-}
-impl From<usize> for VirtPageNum {
-    fn from(v: usize) -> Self {
-        Self(v & ((1 << VPN_WIDTH_SV39) - 1))
     }
 }
 impl From<PhysAddr> for usize {
@@ -204,7 +199,7 @@ impl StepByOne for VirtPageNum {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 /// a simple range structure for type T
 pub struct SimpleRange<T>
 where
