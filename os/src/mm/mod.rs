@@ -17,15 +17,17 @@ pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 pub use frame_allocator::{frame_alloc, frame_dealloc, FrameTracker};
 pub use memory_set::remap_test;
 pub use memory_set::{kernel_token, MapPermission, MemorySet, KERNEL_SPACE};
-use page_table::PTEFlags;
 pub use page_table::{
-    translated_byte_buffer, translated_ref, translated_refmut, translated_str, PageTable,
-    PageTableEntry, UserBuffer, UserBufferIterator,
+    translate_pte, translate_str, translated_byte_buffer, translated_refmut, PageTableEntry,
+    UserBuffer,
 };
+pub use page_table::{PTEFlags, PageTable};
 
 /// initiate heap allocator, frame allocator and kernel space
 pub fn init() {
     heap_allocator::init_heap();
+    // heap_allocator::heap_test();
     frame_allocator::init_frame_allocator();
+    // frame_allocator::frame_allocator_test();
     KERNEL_SPACE.exclusive_access().activate();
 }

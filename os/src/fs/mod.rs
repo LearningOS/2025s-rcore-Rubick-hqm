@@ -5,16 +5,20 @@ mod stdio;
 
 use crate::mm::UserBuffer;
 
-/// trait File for all file types
+/// 所有文件类型trait
 pub trait File: Send + Sync {
-    /// the file readable?
+    /// 是否可读
     fn readable(&self) -> bool;
-    /// the file writable?
+    /// 是否可写
     fn writable(&self) -> bool;
-    /// read from the file to buf, return the number of bytes read
+    /// 读数据到buf，返回已读多少字节
     fn read(&self, buf: UserBuffer) -> usize;
-    /// write to the file from buf, return the number of bytes written
+    /// 写数据到buf，返回已写多少字节
     fn write(&self, buf: UserBuffer) -> usize;
+    /// 返回文件fstat
+    fn fstat(&self) -> Stat {
+        panic!("this file can't fstat")
+    }
 }
 
 /// The stat of a inode
@@ -46,5 +50,5 @@ bitflags! {
     }
 }
 
-pub use inode::{list_apps, open_file, OSInode, OpenFlags};
+pub use inode::{list_apps, open_file, OSInode, OpenFlags, ROOT_INODE};
 pub use stdio::{Stdin, Stdout};

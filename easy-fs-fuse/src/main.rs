@@ -87,65 +87,125 @@ fn easy_fs_pack() -> std::io::Result<()> {
     Ok(())
 }
 
-#[test]
-fn efs_test() -> std::io::Result<()> {
-    let block_file = Arc::new(BlockFile(Mutex::new({
-        let f = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open("target/fs.img")?;
-        f.set_len(8192 * 512).unwrap();
-        f
-    })));
-    EasyFileSystem::create(block_file.clone(), 4096, 1);
-    let efs = EasyFileSystem::open(block_file.clone());
-    let root_inode = EasyFileSystem::root_inode(&efs);
-    root_inode.create("filea");
-    root_inode.create("fileb");
-    for name in root_inode.ls() {
-        println!("{}", name);
-    }
-    let filea = root_inode.find("filea").unwrap();
-    let greet_str = "Hello, world!";
-    filea.write_at(0, greet_str.as_bytes());
-    //let mut buffer = [0u8; 512];
-    let mut buffer = [0u8; 233];
-    let len = filea.read_at(0, &mut buffer);
-    assert_eq!(greet_str, core::str::from_utf8(&buffer[..len]).unwrap(),);
+#[cfg(test)]
+mod test {
+    use super::*;
 
-    let mut random_str_test = |len: usize| {
-        filea.clear();
-        assert_eq!(filea.read_at(0, &mut buffer), 0,);
-        let mut str = String::new();
-        use rand;
-        // random digit
-        for _ in 0..len {
-            str.push(char::from('0' as u8 + rand::random::<u8>() % 10));
+    #[test]
+    fn efs_test() -> std::io::Result<()> {
+        let block_file = Arc::new(BlockFile(Mutex::new({
+            let f = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open("target/fs.img")?;
+            f.set_len(8192 * 512).unwrap();
+            f
+        })));
+        EasyFileSystem::create(block_file.clone(), 4096, 1);
+        let efs = EasyFileSystem::open(block_file.clone());
+        let root_inode = EasyFileSystem::root_inode(&efs);
+        root_inode.create("filea");
+        root_inode.create("fileb");
+        for name in root_inode.ls() {
+            println!("{}", name);
         }
-        filea.write_at(0, str.as_bytes());
-        let mut read_buffer = [0u8; 127];
-        let mut offset = 0usize;
-        let mut read_str = String::new();
-        loop {
-            let len = filea.read_at(offset, &mut read_buffer);
-            if len == 0 {
-                break;
+        let filea = root_inode.find("filea").unwrap();
+        let greet_str = "Hello, world!";
+        filea.write_at(0, greet_str.as_bytes());
+        //let mut buffer = [0u8; 512];
+        let mut buffer = [0u8; 233];
+        let len = filea.read_at(0, &mut buffer);
+        assert_eq!(greet_str, core::str::from_utf8(&buffer[..len]).unwrap(),);
+
+        let mut random_str_test = |len: usize| {
+            filea.clear();
+            assert_eq!(filea.read_at(0, &mut buffer), 0,);
+            let mut str = String::new();
+            use rand;
+            // random digit
+            for _ in 0..len {
+                str.push(char::from('0' as u8 + rand::random::<u8>() % 10));
             }
-            offset += len;
-            read_str.push_str(core::str::from_utf8(&read_buffer[..len]).unwrap());
-        }
-        assert_eq!(str, read_str);
-    };
+            filea.write_at(0, str.as_bytes());
+            let mut read_buffer = [0u8; 127];
+            let mut offset = 0usize;
+            let mut read_str = String::new();
+            loop {
+                let len = filea.read_at(offset, &mut read_buffer);
+                if len == 0 {
+                    break;
+                }
+                offset += len;
+                read_str.push_str(core::str::from_utf8(&read_buffer[..len]).unwrap());
+            }
+            assert_eq!(str, read_str);
+        };
 
-    random_str_test(4 * BLOCK_SZ);
-    random_str_test(8 * BLOCK_SZ + BLOCK_SZ / 2);
-    random_str_test(100 * BLOCK_SZ);
-    random_str_test(70 * BLOCK_SZ + BLOCK_SZ / 7);
-    random_str_test((12 + 128) * BLOCK_SZ);
-    random_str_test(400 * BLOCK_SZ);
-    random_str_test(1000 * BLOCK_SZ);
-    random_str_test(2000 * BLOCK_SZ);
+        random_str_test(4 * BLOCK_SZ);
+        random_str_test(8 * BLOCK_SZ + BLOCK_SZ / 2);
+        random_str_test(100 * BLOCK_SZ);
+        random_str_test(70 * BLOCK_SZ + BLOCK_SZ / 7);
+        random_str_test((12 + 128) * BLOCK_SZ);
+        random_str_test(400 * BLOCK_SZ);
+        random_str_test(1000 * BLOCK_SZ);
+        random_str_test(2000 * BLOCK_SZ);
 
-    Ok(())
+        Ok(())
+    }
+
+    #[test]
+    fn test_link() -> std::io::Result<()> {
+        let block_file = Arc::new(BlockFile(Mutex::new({
+            let f = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open("target/fs.img")?;
+            f.set_len(8192 * 512).unwrap();
+            f
+        })));
+        EasyFileSystem::create(block_file.clone(), 4096, 1);
+        let efs = EasyFileSystem::open(block_file.clone());
+        let efs = EasyFileSystem::open(block_file.clone());
+        let root_inode = EasyFileSystem::root_inode(&efs);
+
+        let test_str = "Hello, world!";
+        let fname0 = "fname1";
+        let fname1 = "fname2";
+        let (lname0, lname1, lname2) = ("linkname0", "linkname1", "linkname2");
+
+        root_inode.create(fname0);
+        let file = root_inode.create(fname1);
+        assert!(file.is_some());
+        assert!(root_inode.find(fname1).is_some());
+        let file = file.unwrap();
+        root_inode.linkat(lname0, file.clone());
+        assert_eq!(file.get_nlink(), 2);
+
+
+        root_inode.linkat(lname1, file.clone());
+        root_inode.linkat(lname2, file.clone());
+        assert_eq!(file.get_nlink(), 4);
+        file.write_at(0, test_str.as_bytes());
+
+        root_inode.unlinkat(fname1, file.clone());
+        let mut buf = [0u8;100];
+        let read_len = file.read_at(0, &mut buf);
+        assert_eq!(test_str, core::str::from_utf8(&buf[..read_len]).unwrap());
+        
+        assert!(root_inode.find(fname1).is_none());
+        assert!(root_inode.find(lname0).is_some());
+        root_inode.unlinkat(lname0, file.clone());
+        assert!(root_inode.find(lname0).is_none());
+        assert!(root_inode.find(fname0).is_some());
+        root_inode.unlinkat(lname1, file.clone());
+        assert!(root_inode.find(lname1).is_none());
+        assert!(root_inode.find(fname0).is_some());
+        root_inode.unlinkat(lname2, file.clone());
+        assert!(root_inode.find(lname2).is_none());
+        assert!(root_inode.find(fname0).is_some());
+
+        Ok(())
+    }
 }
