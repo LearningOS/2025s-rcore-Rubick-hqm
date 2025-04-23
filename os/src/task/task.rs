@@ -4,6 +4,7 @@ use super::id::TaskUserRes;
 use super::{kstack_alloc, KernelStack, ProcessControlBlock, TaskContext};
 use crate::trap::TrapContext;
 use crate::{mm::PhysPageNum, sync::UPSafeCell};
+use alloc::collections::btree_map::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use core::cell::RefMut;
 
@@ -41,6 +42,11 @@ pub struct TaskControlBlockInner {
     pub task_status: TaskStatus,
     /// It is set when active exit or execution error occurs
     pub exit_code: Option<i32>,
+    /// 步进
+    pub stride: TaskStride,
+    /// 互斥锁
+    pub mutex_cnt: usize,
+    pub semaphore_cnt: BTreeMap<usize, isize>,
 }
 
 impl TaskControlBlockInner {
@@ -51,6 +57,11 @@ impl TaskControlBlockInner {
     #[allow(unused)]
     fn get_status(&self) -> TaskStatus {
         self.task_status
+    }
+
+    /// 设置优先级
+    pub fn set_priority(&mut self, priority: u32) {
+        self.stride.priority = priority;
     }
 }
 
@@ -75,6 +86,9 @@ impl TaskControlBlock {
                     task_cx: TaskContext::goto_trap_return(kstack_top),
                     task_status: TaskStatus::Ready,
                     exit_code: None,
+                    stride: TaskStride::default(),
+                    mutex_cnt: 0,
+                    semaphore_cnt: BTreeMap::new(),
                 })
             },
         }
@@ -90,4 +104,22 @@ pub enum TaskStatus {
     Running,
     /// blocked
     Blocked,
+}
+
+#[derive(Copy, Clone, PartialEq)]
+/// stride
+pub struct TaskStride {
+    /// 优先级
+    pub priority: u32,
+    /// 步长
+    pub pass: u32,
+}
+
+impl Default for TaskStride {
+    fn default() -> Self {
+        Self {
+            priority: 16,
+            pass: 0,
+        }
+    }
 }

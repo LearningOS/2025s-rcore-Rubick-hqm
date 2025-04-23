@@ -29,6 +29,8 @@ use manager::fetch_task;
 use process::ProcessControlBlock;
 use switch::__switch;
 
+pub use process::ProcessControlBlockInner;
+
 pub use context::TaskContext;
 pub use id::{kstack_alloc, pid_alloc, KernelStack, PidHandle, IDLE_PID};
 pub use manager::{add_task, pid2process, remove_from_pid2process, remove_task, wakeup_task};

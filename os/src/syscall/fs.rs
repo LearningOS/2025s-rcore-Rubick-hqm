@@ -1,4 +1,4 @@
-use crate::fs::{make_pipe, open_file, OpenFlags, Stat};
+use crate::fs::{make_pipe, open_file, OpenFlags, Stat, ROOT_INODE};
 use crate::mm::{translated_byte_buffer, translated_refmut, translated_str, UserBuffer};
 use crate::task::{current_process, current_task, current_user_token};
 use alloc::sync::Arc;
@@ -123,29 +123,58 @@ pub fn sys_dup(fd: usize) -> isize {
     new_fd as isize
 }
 
-/// YOUR JOB: Implement fstat.
-pub fn sys_fstat(_fd: usize, _st: *mut Stat) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_fstat NOT IMPLEMENTED",
-        current_task().unwrap().process.upgrade().unwrap().getpid()
-    );
-    -1
+/// 显示文件状态
+pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
+    trace!("kernel:pid[{}] sys_fstat", current_process().getpid());
+    let process = current_process();
+    let process_inner = process.inner_exclusive_access();
+    if fd >= process_inner.fd_table.len() {
+        return -1;
+    }
+    if process_inner.fd_table[fd].is_none() {
+        return -1;
+    }
+    let inode = process_inner.fd_table[fd].clone().unwrap();
+    let stat = inode.fstat();
+
+    *translated_refmut(current_user_token(), st) = stat;
+    0
 }
 
-/// YOUR JOB: Implement linkat.
-pub fn sys_linkat(_old_name: *const u8, _new_name: *const u8) -> isize {
+/// 添加硬链接
+pub fn sys_linkat(old_name: *const u8, new_name: *const u8) -> isize {
     trace!(
         "kernel:pid[{}] sys_linkat NOT IMPLEMENTED",
-        current_task().unwrap().process.upgrade().unwrap().getpid()
+        current_process().getpid()
     );
-    -1
+    let token = current_user_token();
+    let old_name = translated_str(token, old_name);
+    let new_name = translated_str(token, new_name);
+    if old_name == new_name {
+        return -1;
+    }
+    let inode = ROOT_INODE.find(&old_name);
+    if inode.is_none() {
+        return -1;
+    }
+    let inode = inode.unwrap();
+    ROOT_INODE.linkat(&new_name, inode);
+    0
 }
 
-/// YOUR JOB: Implement unlinkat.
-pub fn sys_unlinkat(_name: *const u8) -> isize {
+/// 解除硬链接
+pub fn sys_unlinkat(name: *const u8) -> isize {
     trace!(
         "kernel:pid[{}] sys_unlinkat NOT IMPLEMENTED",
-        current_task().unwrap().process.upgrade().unwrap().getpid()
+        current_process().getpid()
     );
+    let token = current_user_token();
+    let name = translated_str(token, name);
+    let inode = ROOT_INODE.find(&name);
+    if inode.is_none() {
+        return -1;
+    }
+    let inode = inode.unwrap();
+    ROOT_INODE.unlinkat(&name, inode);
     -1
 }

@@ -197,4 +197,81 @@ impl Inode {
         });
         block_cache_sync_all();
     }
+    /// 返回当前Inode的inode_id
+    pub fn get_inode_id(&self) -> u32 {
+        let fs = self.fs.lock();
+        fs.get_disk_inode_id(self.block_id as u32, self.block_offset)
+    }
+
+    /// 返回是否是目录
+    pub fn is_dir(&self) -> bool {
+        let _fs = self.fs.lock();
+        self.read_disk_inode(|disk_inode| disk_inode.is_dir())
+    }
+
+    /// 返回是否是文件
+    pub fn is_file(&self) -> bool {
+        let _fs = self.fs.lock();
+        self.read_disk_inode(|disk_inode| disk_inode.is_file())
+    }
+
+    /// 返回nlink数
+    pub fn get_nlink(&self) -> u32 {
+        let _fs = self.fs.lock();
+        self.read_disk_inode(|disk_inode| disk_inode.nlink)
+    }
+
+    /// linkat
+    pub fn linkat(&self, name: &str, inode: Arc<Self>) {
+        let mut fs = self.fs.lock();
+        // nlink+1
+        inode.modify_disk_inode(|disk_inode| disk_inode.nlink += 1);
+        let inode_id = inode.get_inode_id();
+        // 添加目录项
+        self.modify_disk_inode(|root_inode| {
+            assert!(root_inode.is_dir());
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            let new_size = (file_count + 1) * DIRENT_SZ;
+            // increase size
+            self.increase_size(new_size as u32, root_inode, &mut fs);
+            // write dirent
+            let dirent = DirEntry::new(name, inode_id);
+            root_inode.write_at(
+                file_count * DIRENT_SZ,
+                dirent.as_bytes(),
+                &self.block_device,
+            );
+        });
+        block_cache_sync_all();
+    }
+
+    /// unlinkat
+    /// todo 目录项删除后，仍然占据data位置
+    pub fn unlinkat(&self, name: &str, inode: Arc<Self>) {
+        let _fs = self.fs.lock();
+        // 减少nlink
+        let nlink = inode.modify_disk_inode(|disk_inode| {
+            disk_inode.nlink -= 1;
+            disk_inode.nlink
+        });
+        // nlink == 0 移除inode
+        if nlink == 0 {
+            inode.clear();
+        }
+        // 移除目录项
+        self.modify_disk_inode(|root_inode| {
+            assert!(root_inode.is_dir());
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            let mut dirent = DirEntry::empty();
+            for i in 0..file_count {
+                root_inode.read_at(DIRENT_SZ * i, dirent.as_bytes_mut(), &self.block_device);
+                if dirent.name() == name {
+                    let dirent = DirEntry::empty();
+                    root_inode.write_at(DIRENT_SZ * i, dirent.as_bytes(), &self.block_device);
+                    break;
+                }
+            }
+        });
+        block_cache_sync_all();
+    }
 }

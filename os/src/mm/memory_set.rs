@@ -293,6 +293,30 @@ impl MemorySet {
             false
         }
     }
+
+    /// 检查是否存在重叠区域
+    pub fn overlaps(&self, start: VirtAddr, end: VirtAddr) -> bool {
+        self.areas.iter().any(|area| {
+            // 不用考虑等号，因为虚拟页号范围是[vpn_range.get_start(), vpn_range.get_end())
+            area.vpn_range.get_start() < end.ceil() && area.vpn_range.get_end() > start.floor()
+        })
+    }
+
+    /// 取消映射一段逻辑段
+    pub fn remove_area(&mut self, start: VirtAddr, end: VirtAddr) -> isize {
+        // 找到需要取消映射的区域
+        let index = self.areas.iter().position(|area| {
+            area.vpn_range.get_start() == start.floor() && area.vpn_range.get_end() == end.ceil()
+        });
+        // 取消映射
+        if let Some(index) = index {
+            let mut area = self.areas.remove(index);
+            area.unmap(&mut self.page_table);
+            0
+        } else {
+            -1
+        }
+    }
 }
 
 pub struct MapArea {

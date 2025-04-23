@@ -130,6 +130,13 @@ impl EasyFileSystem {
             (inode_id % inodes_per_block) as usize * inode_size,
         )
     }
+    /// 通过block_id和offset，得到inode_id
+    /// 是get_disk-inode_pos的反操作
+    pub fn get_disk_inode_id(&self, block_id: u32, offset: usize) -> u32 {
+        let inode_size = core::mem::size_of::<DiskInode>();
+        let inodes_per_block = (BLOCK_SZ / inode_size) as u32;
+        (block_id - self.inode_area_start_block) * inodes_per_block + (offset / inode_size) as u32
+    }
     /// Get data block position according to the data block id
     pub fn get_data_block_id(&self, data_block_id: u32) -> u32 {
         self.data_area_start_block + data_block_id
