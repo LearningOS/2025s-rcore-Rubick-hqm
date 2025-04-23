@@ -11,6 +11,14 @@ jobs:
     if: github.repository == 'LearningOS/rCore-Camp-Code-2025S'
     runs-on: ubuntu-latest
     steps:
+      - name: Remove Cargo proxy config
+        run: |
+          unset RUSTUP_DIST_SERVER
+          unset RUSTUP_UPDATE_ROOT
+          unset CARGO_HTTP_MULTIPLEXING
+          # 删除或重置全局配置
+          rm ${CARGO_HOME}/config.toml || true
+          rm -rf rm ${CARGO_HOME}/registry/* || true
       - uses: actions/checkout@v4
       - name: Build doc
         run: |
